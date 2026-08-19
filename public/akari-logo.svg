@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 120" width="100%" height="100%">
+  <style>
+    .emblem-bg { fill: #000000; }
+    .emblem-stroke { stroke: #FFFFFF; }
+    .text-fill { fill: #000000; }
+    @media (prefers-color-scheme: dark) {
+      .emblem-bg { fill: #FFFFFF; }
+      .emblem-stroke { stroke: #000000; }
+      .text-fill { fill: #FFFFFF; }
+    }
+  </style>
+
+  <!-- Left Square Box -->
+  <rect x="10" y="10" width="100" height="100" class="emblem-bg" />
+
+  <!-- Radiating Rays -->
+  <!-- Top Ray -->
+  <line x1="60" y1="20" x2="60" y2="27" class="emblem-stroke" stroke-width="3" stroke-linecap="round" />
+  <!-- Top-Left Ray -->
+  <line x1="40" y1="26" x2="45" y2="31" class="emblem-stroke" stroke-width="3" stroke-linecap="round" />
+  <!-- Top-Right Ray -->
+  <line x1="80" y1="26" x2="75" y2="31" class="emblem-stroke" stroke-width="3" stroke-linecap="round" />
+  <!-- Left Ray -->
+  <line x1="30" y1="46" x2="37" y2="46" class="emblem-stroke" stroke-width="3" stroke-linecap="round" />
+  <!-- Right Ray -->
+  <line x1="90" y1="46" x2="83" y2="46" class="emblem-stroke" stroke-width="3" stroke-linecap="round" />
+
+  <!-- Bulb Outer Shell -->
+  <path d="M60 35 C48 35 42 43 42 53 C42 61 47 67 51 72 L51 81 L69 81 L69 72 C73 67 78 61 78 53 C78 43 72 35 60 35 Z" fill="none" class="emblem-stroke" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- Bulb Base Screws -->
+  <line x1="53" y1="85" x2="67" y2="85" class="emblem-stroke" stroke-width="2.8" stroke-linecap="round" />
+  <line x1="55" y1="89" x2="65" y2="89" class="emblem-stroke" stroke-width="2.8" stroke-linecap="round" />
+  <path d="M57 89 C57 93 63 93 63 89" fill="none" class="emblem-stroke" stroke-width="2.5" stroke-linecap="round" />
+
+  <!-- Filament inside bulb -->
+  <path d="M54 58 L57 48 L63 48 L66 58" fill="none" class="emblem-stroke" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- Typography 'akar' -->
+  <text x="122" y="66" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="56" font-weight="900" letter-spacing="-1.5" class="text-fill">
+    akar
+  </text>
+
+  <!-- Typography 'team house' underneath -->
+  <text x="124" y="99" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="25" font-weight="400" letter-spacing="0.2" class="text-fill">
+    team house
+  </text>
+
+  <!-- Custom Letter 'i' Structure extending both rows -->
+  <!-- 'i' Dot -->
+  <circle cx="272" cy="30" r="5.5" class="text-fill" />
+  <!-- 'i' Elongated Stem extending down through 'team house' -->
+  <rect x="266.5" y="41" width="11" height="67" rx="1.5" class="text-fill" />
+</svg>

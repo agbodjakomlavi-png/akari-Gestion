@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+#sidebar-pane {
+  flex-shrink: 0;
+  overflow-y: auto;
+}

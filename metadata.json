@@ -1,0 +1,10 @@
+{
+  "name": "Akari Team House - Messagerie Instantanée",
+  "description": "Application web de messagerie instantanée collaborative inspirée de WhatsApp avec chat en direct, messages vocaux, médias, appels audio/vidéo, statuts et personnalisation de thèmes.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
