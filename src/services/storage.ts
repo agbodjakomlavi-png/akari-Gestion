@@ -21,11 +21,6 @@ import { sounds } from './soundEffects';
 
 type StorageListener = () => void;
 
-interface WebSocketMessage {
-  type: 'message' | 'typing' | 'reaction' | 'ping' | 'user_joined' | 'user_left';
-  payload: any;
-}
-
 class AppStorageService {
   private users: User[] = [];
   private currentUser: User | null = null;
@@ -50,8 +45,10 @@ class AppStorageService {
   private autoReplyTimeouts: Map<string, number> = new Map();
   private ws: WebSocket | null = null;
   private wsUrl: string = '';
+  private reconnectTimeout: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  private maxReconnectAttempts = 3;
+  private isIntentionallyClosed = false;
 
   constructor() {
     this.init();
@@ -129,16 +126,19 @@ class AppStorageService {
 
     this.recomputeLastMessages();
 
+    // BroadcastChannel for multi-tab sync (more reliable than WebSocket for local dev)
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       try {
         this.broadcastChannel = new BroadcastChannel('akari_team_sync');
         this.broadcastChannel.onmessage = (event) => {
           if (event.data?.type === 'SYNC_ALL') {
             this.loadFromLocalStorageWithoutBroadcast();
+          } else if (event.data?.type === 'MESSAGE') {
+            this.handleBroadcastMessage(event.data.payload);
           }
         };
       } catch {
-        // Channel fallback
+        console.log('BroadcastChannel not available');
       }
     }
   }
@@ -150,7 +150,12 @@ class AppStorageService {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       this.wsUrl = `${protocol}//${window.location.host}`;
 
-      this.connect();
+      // Only try to connect if NOT in localhost (development)
+      if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        this.connect();
+      } else {
+        console.log('📡 WebSocket disabled for localhost - using BroadcastChannel instead');
+      }
     } catch (error) {
       console.warn('WebSocket init error:', error);
     }
@@ -158,21 +163,25 @@ class AppStorageService {
 
   private connect() {
     if (typeof window === 'undefined' || !this.currentUser) return;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
 
     try {
       const params = new URLSearchParams({
         userId: this.currentUser.id,
       });
+      
+      console.log(`🔌 Attempting WebSocket connection to ${this.wsUrl}`);
       this.ws = new WebSocket(`${this.wsUrl}?${params}`);
 
       this.ws.onopen = () => {
         console.log('📨 WebSocket connected');
         this.reconnectAttempts = 0;
+        this.isIntentionallyClosed = false;
       };
 
       this.ws.onmessage = (event) => {
         try {
-          const message: WebSocketMessage = JSON.parse(event.data);
+          const message = JSON.parse(event.data);
           this.handleWebSocketMessage(message);
         } catch (error) {
           console.error('WebSocket message parse error:', error);
@@ -184,10 +193,17 @@ class AppStorageService {
       };
 
       this.ws.onclose = () => {
-        console.log('WebSocket disconnected, attempting reconnect...');
+        if (this.isIntentionallyClosed) return;
+        
         if (this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
-          setTimeout(() => this.connect(), 2000 * this.reconnectAttempts);
+          const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 10000);
+          console.log(`⏳ WebSocket reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+          
+          if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+          this.reconnectTimeout = setTimeout(() => this.connect(), delay);
+        } else {
+          console.warn('❌ WebSocket max reconnect attempts reached');
         }
       };
     } catch (error) {
@@ -195,7 +211,7 @@ class AppStorageService {
     }
   }
 
-  private handleWebSocketMessage(message: WebSocketMessage) {
+  private handleWebSocketMessage(message: any) {
     const { type, payload } = message;
 
     switch (type) {
@@ -259,6 +275,20 @@ class AppStorageService {
     }
   }
 
+  private handleBroadcastMessage(payload: any) {
+    // Handle messages from other tabs
+    if (payload.type === 'message' && payload.conversationId) {
+      if (!this.messages[payload.conversationId]) {
+        this.messages[payload.conversationId] = [];
+      }
+      const exists = this.messages[payload.conversationId].some((m) => m.id === payload.id);
+      if (!exists) {
+        this.messages[payload.conversationId].push(payload);
+        this.notify();
+      }
+    }
+  }
+
   private recomputeLastMessages() {
     this.conversations.forEach((conv) => {
       const msgs = this.messages[conv.id];
@@ -285,6 +315,8 @@ class AppStorageService {
       // Storage quota
     }
     this.notify();
+    
+    // Broadcast to other tabs
     if (this.broadcastChannel) {
       this.broadcastChannel.postMessage({ type: 'SYNC_ALL' });
     }
@@ -330,6 +362,15 @@ class AppStorageService {
   private sendWebSocketMessage(message: any) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+    }
+  }
+
+  private broadcastMessage(message: any) {
+    if (this.broadcastChannel) {
+      this.broadcastChannel.postMessage({ 
+        type: 'MESSAGE', 
+        payload: message 
+      });
     }
   }
 
@@ -398,6 +439,7 @@ class AppStorageService {
     }
     this.currentUser = null;
     if (this.ws) {
+      this.isIntentionallyClosed = true;
       this.ws.close();
       this.ws = null;
     }
@@ -836,11 +878,14 @@ class AppStorageService {
       sounds.playSendSound();
     }
 
-    // Send via WebSocket
+    // Send via WebSocket (production only)
     this.sendWebSocketMessage({
       type: 'message',
       payload: newMsg,
     });
+
+    // Also broadcast to other tabs
+    this.broadcastMessage(newMsg);
 
     this.persist();
     this.scheduleDeliveredAndRead(conversationId, newMsg.id);
@@ -897,6 +942,12 @@ class AppStorageService {
       this.sendWebSocketMessage({
         type: 'typing',
         payload: { userId: respondent.id, isTyping: true, conversationId },
+      });
+      this.broadcastMessage({
+        type: 'typing',
+        userId: respondent.id,
+        isTyping: true,
+        conversationId,
       });
       this.persist();
     }, 1500);
@@ -958,11 +1009,12 @@ class AppStorageService {
         sounds.playReceiveSound();
       }
 
-      // Send reply via WebSocket
+      // Send reply via WebSocket and broadcast
       this.sendWebSocketMessage({
         type: 'message',
         payload: replyMsg,
       });
+      this.broadcastMessage(replyMsg);
 
       this.persist();
     }, 4500);
