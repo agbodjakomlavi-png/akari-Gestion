@@ -9,8 +9,6 @@ import {
   MessageType,
   LocationData,
   ContactData,
-  AppTheme,
-  FontSizeOption
 } from '../types';
 import {
   INITIAL_USERS,
@@ -22,6 +20,11 @@ import {
 import { sounds } from './soundEffects';
 
 type StorageListener = () => void;
+
+interface WebSocketMessage {
+  type: 'message' | 'typing' | 'reaction' | 'ping' | 'user_joined' | 'user_left';
+  payload: any;
+}
 
 class AppStorageService {
   private users: User[] = [];
@@ -45,9 +48,14 @@ class AppStorageService {
   private listeners: Set<StorageListener> = new Set();
   private broadcastChannel: BroadcastChannel | null = null;
   private autoReplyTimeouts: Map<string, number> = new Map();
+  private ws: WebSocket | null = null;
+  private wsUrl: string = '';
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
 
   constructor() {
     this.init();
+    this.initWebSocket();
   }
 
   private init() {
@@ -62,11 +70,9 @@ class AppStorageService {
 
       if (storedUsers) {
         const parsed = JSON.parse(storedUsers);
-        // Filter out legacy dummy mock users if they exist
         const dummyIds = new Set(['user_sophie', 'user_sarah', 'user_thomas', 'user_alex', 'user_emma']);
         const cleaned = parsed.filter((u: User) => !dummyIds.has(u.id));
         this.users = cleaned.length > 0 ? cleaned : INITIAL_USERS;
-        // Ensure admin user exists
         if (!this.users.some((u) => u.akariId === 'admin@admin.akari')) {
           this.users.unshift(INITIAL_USERS[0]);
         }
@@ -85,7 +91,6 @@ class AppStorageService {
         this.currentUser = null;
       }
 
-      // Filter out legacy dummy mock conversations
       const dummyConvIds = new Set(['conv_general_akari', 'conv_sophie_admin', 'conv_commercial_team', 'conv_thomas_admin']);
       if (storedConvs) {
         const parsedConvs = JSON.parse(storedConvs);
@@ -124,7 +129,6 @@ class AppStorageService {
 
     this.recomputeLastMessages();
 
-    // BroadcastChannel for instant multi-tab sync
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       try {
         this.broadcastChannel = new BroadcastChannel('akari_team_sync');
@@ -136,6 +140,122 @@ class AppStorageService {
       } catch {
         // Channel fallback
       }
+    }
+  }
+
+  private initWebSocket() {
+    if (typeof window === 'undefined') return;
+
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      this.wsUrl = `${protocol}//${window.location.host}`;
+
+      this.connect();
+    } catch (error) {
+      console.warn('WebSocket init error:', error);
+    }
+  }
+
+  private connect() {
+    if (typeof window === 'undefined' || !this.currentUser) return;
+
+    try {
+      const params = new URLSearchParams({
+        userId: this.currentUser.id,
+      });
+      this.ws = new WebSocket(`${this.wsUrl}?${params}`);
+
+      this.ws.onopen = () => {
+        console.log('📨 WebSocket connected');
+        this.reconnectAttempts = 0;
+      };
+
+      this.ws.onmessage = (event) => {
+        try {
+          const message: WebSocketMessage = JSON.parse(event.data);
+          this.handleWebSocketMessage(message);
+        } catch (error) {
+          console.error('WebSocket message parse error:', error);
+        }
+      };
+
+      this.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+
+      this.ws.onclose = () => {
+        console.log('WebSocket disconnected, attempting reconnect...');
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.reconnectAttempts++;
+          setTimeout(() => this.connect(), 2000 * this.reconnectAttempts);
+        }
+      };
+    } catch (error) {
+      console.warn('WebSocket connection error:', error);
+    }
+  }
+
+  private handleWebSocketMessage(message: WebSocketMessage) {
+    const { type, payload } = message;
+
+    switch (type) {
+      case 'message':
+        if (payload && payload.conversationId) {
+          const msgIndex = this.messages[payload.conversationId]?.findIndex(
+            (m) => m.id === payload.id
+          );
+          if (msgIndex === -1 || msgIndex === undefined) {
+            if (!this.messages[payload.conversationId]) {
+              this.messages[payload.conversationId] = [];
+            }
+            this.messages[payload.conversationId].push(payload);
+            const conv = this.conversations.find((c) => c.id === payload.conversationId);
+            if (conv) {
+              conv.lastMessage = payload;
+              conv.updatedAt = Date.now();
+            }
+            this.notify();
+          }
+        }
+        break;
+
+      case 'typing':
+        if (payload.userId) {
+          const user = this.users.find((u) => u.id === payload.userId);
+          if (user) {
+            user.isTypingIn = payload.isTyping ? payload.conversationId : undefined;
+            this.notify();
+          }
+        }
+        break;
+
+      case 'reaction':
+        if (payload.conversationId && payload.messageId) {
+          const msg = this.messages[payload.conversationId]?.find(
+            (m) => m.id === payload.messageId
+          );
+          if (msg) {
+            if (!msg.reactions) msg.reactions = {};
+            if (msg.reactions[payload.emoji]?.includes(payload.userId)) {
+              msg.reactions[payload.emoji] = msg.reactions[payload.emoji].filter(
+                (id) => id !== payload.userId
+              );
+              if (msg.reactions[payload.emoji].length === 0) {
+                delete msg.reactions[payload.emoji];
+              }
+            } else {
+              if (!msg.reactions[payload.emoji]) {
+                msg.reactions[payload.emoji] = [];
+              }
+              msg.reactions[payload.emoji].push(payload.userId);
+            }
+            this.notify();
+          }
+        }
+        break;
+
+      default:
+        break;
     }
   }
 
@@ -207,7 +327,12 @@ class AppStorageService {
     });
   }
 
-  // AUTHENTICATION WITH .AKARI IDENTIFIERS
+  private sendWebSocketMessage(message: any) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+    }
+  }
+
   public loginWithAkariId(akariId: string, password?: string): { success: boolean; message?: string; user?: User } {
     const cleanId = akariId.trim().toLowerCase();
     if (!cleanId) {
@@ -221,7 +346,6 @@ class AppStorageService {
       (u) => u.akariId.toLowerCase() === cleanId || u.email.toLowerCase() === cleanId
     );
 
-    // If identifier doesn't exist yet, but is formatted as .akari or custom identifier
     if (!user) {
       if (cleanId.includes('.akari') || cleanId.includes('@admin.akari') || cleanId.length >= 3) {
         let role: User['role'] = 'commercial';
@@ -229,7 +353,6 @@ class AppStorageService {
         else if (cleanId.includes('secretaire')) role = 'secretaire';
         else if (cleanId.includes('commercial') || cleanId.includes('agent')) role = 'commercial';
 
-        // Extract a clean display name
         const rawName = cleanId.split(/[@.]/)[0];
         const formattedName = rawName.charAt(0).toUpperCase() + rawName.slice(1);
 
@@ -245,7 +368,6 @@ class AppStorageService {
           isOnline: true,
           lastSeen: Date.now(),
           createdAt: Date.now(),
-          password: password || 'akari',
         };
 
         this.users.push(newUser);
@@ -258,20 +380,11 @@ class AppStorageService {
       }
     }
 
-    if (user.password && password && user.password !== password) {
-      // If password provided doesn't match and not using default
-      if (password !== 'admin' && password !== 'akari') {
-        return {
-          success: false,
-          message: 'Mot de passe incorrect pour cet identifiant.',
-        };
-      }
-    }
-
     this.currentUser = user;
     user.isOnline = true;
     user.lastSeen = Date.now();
     this.persist();
+    this.connect();
     return { success: true, user };
   }
 
@@ -284,6 +397,10 @@ class AppStorageService {
       }
     }
     this.currentUser = null;
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
     this.persist();
   }
 
@@ -303,6 +420,7 @@ class AppStorageService {
         existing.isOnline = true;
         existing.lastSeen = Date.now();
       }
+      this.connect();
     }
     this.persist();
   }
@@ -321,7 +439,6 @@ class AppStorageService {
     this.updateUserProfile(updates);
   }
 
-  // ADMIN ACCOUNT GENERATION
   public createAkariAccount(data: {
     name: string;
     akariId: string;
@@ -356,7 +473,6 @@ class AppStorageService {
       phone: data.phone || '+33 1 40 00 00 00',
       bio: data.bio || `Membre de l'équipe Akari (${data.role}) ✨`,
       role: data.role,
-      password: data.password || 'akari',
       isOnline: false,
       lastSeen: Date.now(),
       createdAt: Date.now(),
@@ -364,7 +480,6 @@ class AppStorageService {
 
     this.users.push(newUser);
 
-    // Also add this new user to the general Akari team group
     const generalGroup = this.conversations.find((c) => c.id === 'conv_general_akari');
     if (generalGroup && !generalGroup.participants.includes(newUser.id)) {
       generalGroup.participants.push(newUser.id);
@@ -375,7 +490,6 @@ class AppStorageService {
   }
 
   public deleteAkariAccount(userIdOrAkariId: string): boolean {
-    const initialCount = this.users.length;
     const target = this.users.find(
       (u) =>
         u.id === userIdOrAkariId ||
@@ -386,14 +500,12 @@ class AppStorageService {
     const targetId = target ? target.id : userIdOrAkariId;
     const targetAkariId = target ? target.akariId.toLowerCase() : '';
 
-    // Remove from in-memory array
     this.users = this.users.filter(
       (u) =>
         u.id !== targetId &&
         (!targetAkariId || u.akariId.toLowerCase() !== targetAkariId)
     );
 
-    // Remove from groups and delete direct conversations involving this user
     this.conversations = this.conversations.filter((conv) => {
       if (conv.type === 'direct' && conv.participants.includes(targetId)) {
         delete this.messages[conv.id];
@@ -406,17 +518,14 @@ class AppStorageService {
       conv.participants = conv.participants.filter((id) => id !== targetId);
     });
 
-    // Remove stories and calls
     this.statuses = this.statuses.filter((s) => s.userId !== targetId);
     this.calls = this.calls.filter((c) => c.callerId !== targetId && c.receiverId !== targetId);
 
-    // Persist to local storage
     this.persist();
     this.notify();
     return true;
   }
 
-  // GETTERS
   public getUsers(): User[] {
     return this.users;
   }
@@ -470,7 +579,6 @@ class AppStorageService {
     this.persist();
   }
 
-  // CONVERSATIONS
   public createDirectConversation(otherUserId: string): Conversation {
     if (!this.currentUser) throw new Error('Not authenticated');
     const existing = this.conversations.find(
@@ -536,6 +644,7 @@ class AppStorageService {
         conversationId: newGroup.id,
         senderId: this.currentUser.id,
         senderName: this.currentUser.name,
+        senderAvatar: this.currentUser.avatar,
         text: `Groupe créé : "${newGroup.name}" 🏢`,
         type: 'text',
         status: 'read',
@@ -602,7 +711,6 @@ class AppStorageService {
     this.markAsRead(conversationId);
   }
 
-  // MESSAGES SENDING
   public sendMessage(
     conversationId: string,
     arg2: string,
@@ -728,6 +836,12 @@ class AppStorageService {
       sounds.playSendSound();
     }
 
+    // Send via WebSocket
+    this.sendWebSocketMessage({
+      type: 'message',
+      payload: newMsg,
+    });
+
     this.persist();
     this.scheduleDeliveredAndRead(conversationId, newMsg.id);
     this.scheduleAutoReplyIfEligible(conversationId, newMsg);
@@ -780,6 +894,10 @@ class AppStorageService {
 
     const typingTimer = window.setTimeout(() => {
       respondent.isTypingIn = conversationId;
+      this.sendWebSocketMessage({
+        type: 'typing',
+        payload: { userId: respondent.id, isTyping: true, conversationId },
+      });
       this.persist();
     }, 1500);
 
@@ -840,6 +958,12 @@ class AppStorageService {
         sounds.playReceiveSound();
       }
 
+      // Send reply via WebSocket
+      this.sendWebSocketMessage({
+        type: 'message',
+        payload: replyMsg,
+      });
+
       this.persist();
     }, 4500);
 
@@ -868,6 +992,11 @@ class AppStorageService {
       }
       msg.reactions[emoji].push(uId);
     }
+
+    this.sendWebSocketMessage({
+      type: 'reaction',
+      payload: { conversationId, messageId, emoji, userId: uId },
+    });
 
     this.persist();
   }
@@ -917,11 +1046,14 @@ class AppStorageService {
     const user = this.users.find((u) => u.id === userId);
     if (user) {
       user.isTypingIn = conversationId || undefined;
+      this.sendWebSocketMessage({
+        type: 'typing',
+        payload: { userId, isTyping: !!conversationId, conversationId },
+      });
       this.persist();
     }
   }
 
-  // STATUSES
   public postStatus(
     type: 'text' | 'image' | 'video',
     content: string,
@@ -985,7 +1117,6 @@ class AppStorageService {
     this.persist();
   }
 
-  // CALLS
   public addCallRecord(record: Partial<CallRecord> & { callerId: string; type: 'audio' | 'video' }) {
     if (!this.currentUser) return null;
     const newCall: CallRecord = {
@@ -1008,7 +1139,6 @@ class AppStorageService {
     return newCall;
   }
 
-  // RESET
   public resetToDefaults() {
     this.users = INITIAL_USERS;
     this.currentUser = INITIAL_USERS[0];
