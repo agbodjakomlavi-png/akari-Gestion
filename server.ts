@@ -14,11 +14,10 @@ const __dirname = dirname(__filename);
 
 const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, perMessageDeflate: false });
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const NODE_ENV = process.env.NODE_ENV || 'development';
-const VITE_MANIFEST = 'dist/.vite/manifest.json';
 
 // In-memory data store (replace with database in production)
 const messageStore: Record<string, any[]> = {};
@@ -30,9 +29,14 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Serve built frontend in production
-if (NODE_ENV === 'production' && fs.existsSync('dist')) {
-  app.use(express.static('dist'));
+// Serve static files from dist directory
+const distPath = join(__dirname, 'dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath, {
+    maxAge: '1h',
+    etag: false,
+    index: false,
+  }));
 }
 
 // REST API endpoints
@@ -58,8 +62,6 @@ app.post('/api/messages', (req, res) => {
   };
 
   messageStore[conversationId].push(storedMessage);
-
-  // Broadcast to connected users
   broadcastToConversation(conversationId, {
     type: 'message',
     payload: storedMessage,
@@ -223,15 +225,19 @@ function broadcastToConversation(conversationId: string, message: any) {
   });
 }
 
-// Catch-all for SPA routing in production
-if (NODE_ENV === 'production') {
-  app.get('*', (req, res) => {
-    res.sendFile(join(__dirname, 'dist', 'index.html'));
-  });
-}
+// SPA fallback: serve index.html for all unmatched routes
+app.get('*', (req, res) => {
+  const indexPath = join(distPath, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).json({ error: 'Frontend not built. Run: npm run build' });
+  }
+});
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Akari server running on http://0.0.0.0:${PORT}`);
   console.log(`📨 WebSocket available at ws://0.0.0.0:${PORT}`);
   console.log(`Environment: ${NODE_ENV}`);
+  console.log(`Static files: ${fs.existsSync(distPath) ? 'Ready' : 'Not built (run npm run build)'}`);
 });
