@@ -1,0 +1,13 @@
+{
+  "name": "akari-messaging",
+  "description": "Real-time team messaging app with WebSocket",
+  "repository": "https://github.com/YOUR_USERNAME/akari-team-house",
+  "keywords": ["messaging", "websocket", "react", "express", "realtime"],
+  "addons": [],
+  "env": {
+    "GEMINI_API_KEY": {
+      "description": "Google Gemini API key for AI features",
+      "required": false
+    }
+  }
+}
