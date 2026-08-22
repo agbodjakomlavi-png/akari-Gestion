@@ -126,15 +126,13 @@ class AppStorageService {
 
     this.recomputeLastMessages();
 
-    // BroadcastChannel for multi-tab sync (more reliable than WebSocket for local dev)
+    // BroadcastChannel for multi-tab sync
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       try {
         this.broadcastChannel = new BroadcastChannel('akari_team_sync');
         this.broadcastChannel.onmessage = (event) => {
           if (event.data?.type === 'SYNC_ALL') {
             this.loadFromLocalStorageWithoutBroadcast();
-          } else if (event.data?.type === 'MESSAGE') {
-            this.handleBroadcastMessage(event.data.payload);
           }
         };
       } catch {
@@ -149,13 +147,7 @@ class AppStorageService {
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       this.wsUrl = `${protocol}//${window.location.host}`;
-
-      // Only try to connect if NOT in localhost (development)
-      if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-        this.connect();
-      } else {
-        console.log('📡 WebSocket disabled for localhost - using BroadcastChannel instead');
-      }
+      this.connect();
     } catch (error) {
       console.warn('WebSocket init error:', error);
     }
@@ -170,11 +162,11 @@ class AppStorageService {
         userId: this.currentUser.id,
       });
       
-      console.log(`🔌 Attempting WebSocket connection to ${this.wsUrl}`);
+      console.log(`🔌 Connecting to ${this.wsUrl}`);
       this.ws = new WebSocket(`${this.wsUrl}?${params}`);
 
       this.ws.onopen = () => {
-        console.log('📨 WebSocket connected');
+        console.log('✅ WebSocket connected - syncing with server');
         this.reconnectAttempts = 0;
         this.isIntentionallyClosed = false;
       };
@@ -198,12 +190,10 @@ class AppStorageService {
         if (this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
           const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 10000);
-          console.log(`⏳ WebSocket reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+          console.log(`⏳ Reconnecting in ${delay}ms...`);
           
           if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
           this.reconnectTimeout = setTimeout(() => this.connect(), delay);
-        } else {
-          console.warn('❌ WebSocket max reconnect attempts reached');
         }
       };
     } catch (error) {
@@ -215,15 +205,28 @@ class AppStorageService {
     const { type, payload } = message;
 
     switch (type) {
+      case 'sync':
+        // Server sends full sync on connection
+        if (payload.conversations) {
+          this.conversations = payload.conversations;
+        }
+        if (payload.messages) {
+          this.messages = payload.messages;
+        }
+        if (payload.users) {
+          this.users = payload.users;
+        }
+        console.log('📦 Server sync completed');
+        this.notify();
+        break;
+
       case 'message':
         if (payload && payload.conversationId) {
-          const msgIndex = this.messages[payload.conversationId]?.findIndex(
-            (m) => m.id === payload.id
-          );
-          if (msgIndex === -1 || msgIndex === undefined) {
-            if (!this.messages[payload.conversationId]) {
-              this.messages[payload.conversationId] = [];
-            }
+          if (!this.messages[payload.conversationId]) {
+            this.messages[payload.conversationId] = [];
+          }
+          const exists = this.messages[payload.conversationId].some(m => m.id === payload.id);
+          if (!exists) {
             this.messages[payload.conversationId].push(payload);
             const conv = this.conversations.find((c) => c.id === payload.conversationId);
             if (conv) {
@@ -233,6 +236,16 @@ class AppStorageService {
             this.notify();
           }
         }
+        break;
+
+      case 'user_joined':
+        console.log(`👤 ${payload.userId} joined`);
+        this.notify();
+        break;
+
+      case 'user_left':
+        console.log(`👋 ${payload.userId} left`);
+        this.notify();
         break;
 
       case 'typing':
@@ -245,47 +258,8 @@ class AppStorageService {
         }
         break;
 
-      case 'reaction':
-        if (payload.conversationId && payload.messageId) {
-          const msg = this.messages[payload.conversationId]?.find(
-            (m) => m.id === payload.messageId
-          );
-          if (msg) {
-            if (!msg.reactions) msg.reactions = {};
-            if (msg.reactions[payload.emoji]?.includes(payload.userId)) {
-              msg.reactions[payload.emoji] = msg.reactions[payload.emoji].filter(
-                (id) => id !== payload.userId
-              );
-              if (msg.reactions[payload.emoji].length === 0) {
-                delete msg.reactions[payload.emoji];
-              }
-            } else {
-              if (!msg.reactions[payload.emoji]) {
-                msg.reactions[payload.emoji] = [];
-              }
-              msg.reactions[payload.emoji].push(payload.userId);
-            }
-            this.notify();
-          }
-        }
-        break;
-
       default:
         break;
-    }
-  }
-
-  private handleBroadcastMessage(payload: any) {
-    // Handle messages from other tabs
-    if (payload.type === 'message' && payload.conversationId) {
-      if (!this.messages[payload.conversationId]) {
-        this.messages[payload.conversationId] = [];
-      }
-      const exists = this.messages[payload.conversationId].some((m) => m.id === payload.id);
-      if (!exists) {
-        this.messages[payload.conversationId].push(payload);
-        this.notify();
-      }
     }
   }
 
@@ -316,7 +290,6 @@ class AppStorageService {
     }
     this.notify();
     
-    // Broadcast to other tabs
     if (this.broadcastChannel) {
       this.broadcastChannel.postMessage({ type: 'SYNC_ALL' });
     }
@@ -362,15 +335,23 @@ class AppStorageService {
   private sendWebSocketMessage(message: any) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+    } else {
+      console.warn('WebSocket not connected, using REST API fallback');
+      this.sendViaRest(message);
     }
   }
 
-  private broadcastMessage(message: any) {
-    if (this.broadcastChannel) {
-      this.broadcastChannel.postMessage({ 
-        type: 'MESSAGE', 
-        payload: message 
-      });
+  private sendViaRest(message: any) {
+    // Fallback to REST API if WebSocket is not available
+    if (message.type === 'message' && message.payload) {
+      fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationId: message.payload.conversationId,
+          message: message.payload,
+        }),
+      }).catch(err => console.error('REST API error:', err));
     }
   }
 
@@ -413,10 +394,17 @@ class AppStorageService {
 
         this.users.push(newUser);
         user = newUser;
+
+        // Save to server
+        fetch('/api/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newUser),
+        }).catch(err => console.error('Error saving user:', err));
       } else {
         return {
           success: false,
-          message: `Identifiant "${akariId}" introuvable. Veuillez renseigner un identifiant unique se terminant par .akari (ex: admin@admin.akari, nom.secretaire.akari, nom.commercial.akari).`,
+          message: `Identifiant "${akariId}" introuvable. Veuillez renseigner un identifiant unique se terminant par .akari.`,
         };
       }
     }
@@ -496,7 +484,7 @@ class AppStorageService {
     }
 
     if (this.users.some((u) => u.akariId.toLowerCase() === cleanId)) {
-      return { success: false, message: `L'identifiant ${cleanId} existe déjà dans le registre Akari.` };
+      return { success: false, message: `L'identifiant ${cleanId} existe déjà.` };
     }
 
     const defaultAvatars: Record<UserRole, string> = {
@@ -522,10 +510,12 @@ class AppStorageService {
 
     this.users.push(newUser);
 
-    const generalGroup = this.conversations.find((c) => c.id === 'conv_general_akari');
-    if (generalGroup && !generalGroup.participants.includes(newUser.id)) {
-      generalGroup.participants.push(newUser.id);
-    }
+    // Save to server
+    fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newUser),
+    }).catch(err => console.error('Error saving user:', err));
 
     this.persist();
     return { success: true, user: newUser };
@@ -645,6 +635,14 @@ class AppStorageService {
 
     this.conversations.unshift(newConv);
     this.messages[newConv.id] = [];
+
+    // Save to server
+    fetch('/api/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newConv),
+    }).catch(err => console.error('Error saving conversation:', err));
+
     this.persist();
     return newConv;
   }
@@ -693,6 +691,14 @@ class AppStorageService {
         createdAt: Date.now(),
       },
     ];
+
+    // Save to server
+    fetch('/api/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newGroup),
+    }).catch(err => console.error('Error saving conversation:', err));
+
     this.recomputeLastMessages();
     this.persist();
     return newGroup;
@@ -878,18 +884,14 @@ class AppStorageService {
       sounds.playSendSound();
     }
 
-    // Send via WebSocket (production only)
+    // Send via WebSocket (with REST fallback)
     this.sendWebSocketMessage({
       type: 'message',
       payload: newMsg,
     });
 
-    // Also broadcast to other tabs
-    this.broadcastMessage(newMsg);
-
     this.persist();
     this.scheduleDeliveredAndRead(conversationId, newMsg.id);
-    this.scheduleAutoReplyIfEligible(conversationId, newMsg);
 
     return newMsg;
   }
@@ -915,113 +917,6 @@ class AppStorageService {
     }, 3200);
   }
 
-  private scheduleAutoReplyIfEligible(conversationId: string, incomingUserMsg: Message) {
-    const conv = this.conversations.find((c) => c.id === conversationId);
-    if (!conv || !this.currentUser) return;
-
-    let respondentId = '';
-    if (conv.type === 'direct') {
-      respondentId = conv.participants.find((p) => p !== this.currentUser?.id) || '';
-    } else {
-      const eligible = conv.participants.filter((p) => p !== this.currentUser?.id);
-      if (eligible.length > 0) {
-        respondentId = eligible[Math.floor(Math.random() * eligible.length)];
-      }
-    }
-
-    if (!respondentId || respondentId === this.currentUser.id) return;
-    const respondent = this.users.find((u) => u.id === respondentId);
-    if (!respondent) return;
-
-    if (this.autoReplyTimeouts.has(conversationId)) {
-      window.clearTimeout(this.autoReplyTimeouts.get(conversationId));
-    }
-
-    const typingTimer = window.setTimeout(() => {
-      respondent.isTypingIn = conversationId;
-      this.sendWebSocketMessage({
-        type: 'typing',
-        payload: { userId: respondent.id, isTyping: true, conversationId },
-      });
-      this.broadcastMessage({
-        type: 'typing',
-        userId: respondent.id,
-        isTyping: true,
-        conversationId,
-      });
-      this.persist();
-    }, 1500);
-
-    const replyTimer = window.setTimeout(() => {
-      respondent.isTypingIn = undefined;
-      const responses: Record<string, string[]> = {
-        image: [
-          'Bien reçu cette image ! Merci pour le partage Akari ✨',
-          'Document visuel validé 👍',
-        ],
-        audio: [
-          'Note vocale écoutée et bien reçue 🎧',
-          'C\'est très clair, je m\'en occupe !',
-        ],
-        location: [
-          'Position bien notée pour notre rendez-vous 📍',
-        ],
-        document: [
-          'Merci pour le document, je le consulte immédiatement 📄',
-        ],
-        text: [
-          'Bien reçu ! Message transmis sur le canal Akari 🚀',
-          'Parfait, je mets à jour le dossier correspondant.',
-          'Entendu ! Disponible si besoin d\'un appel ou d\'une validation.',
-          'C\'est noté. Tout fonctionne parfaitement avec les identifiants .akari ✨',
-        ],
-      };
-
-      const pool = responses[incomingUserMsg.type] || responses.text;
-      const randomText = pool[Math.floor(Math.random() * pool.length)];
-
-      const replyMsg: Message = {
-        id: `msg_reply_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-        conversationId,
-        senderId: respondent.id,
-        senderName: respondent.name,
-        senderAvatar: respondent.avatar,
-        text: randomText,
-        type: 'text',
-        status: 'delivered',
-        createdAt: Date.now(),
-      };
-
-      if (!this.messages[conversationId]) {
-        this.messages[conversationId] = [];
-      }
-      this.messages[conversationId].push(replyMsg);
-
-      if (conv) {
-        conv.lastMessage = replyMsg;
-        conv.updatedAt = Date.now();
-        if (this.currentUser) {
-          conv.unreadCounts[this.currentUser.id] = (conv.unreadCounts[this.currentUser.id] || 0) + 1;
-        }
-      }
-
-      if (this.settings.soundEnabled) {
-        sounds.playReceiveSound();
-      }
-
-      // Send reply via WebSocket and broadcast
-      this.sendWebSocketMessage({
-        type: 'message',
-        payload: replyMsg,
-      });
-      this.broadcastMessage(replyMsg);
-
-      this.persist();
-    }, 4500);
-
-    this.autoReplyTimeouts.set(conversationId, replyTimer);
-  }
-
   public reactToMessage(conversationId: string, messageId: string, emoji: string, userId?: string) {
     const msgs = this.messages[conversationId];
     if (!msgs) return;
@@ -1044,11 +939,6 @@ class AppStorageService {
       }
       msg.reactions[emoji].push(uId);
     }
-
-    this.sendWebSocketMessage({
-      type: 'reaction',
-      payload: { conversationId, messageId, emoji, userId: uId },
-    });
 
     this.persist();
   }
